@@ -1,10 +1,12 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
+import { connectDB } from "./config/db.js";
+import { Article } from "./models/article.js";
 
 const BASE_URL = "https://beyondchats.com";
 
 /**
- * Fetch and parse a blog listing page
+ * Fetch article list from a blog page
  */
 async function fetchBlogList(pageNumber) {
   const url = `${BASE_URL}/blogs/page/${pageNumber}/`;
@@ -13,7 +15,7 @@ async function fetchBlogList(pageNumber) {
 
   const articles = [];
 
-  $(".blog-item, article").each((_, el) => {
+  $("article").each((_, el) => {
     const title = $(el).find("h2 a").text().trim();
     const link = $(el).find("h2 a").attr("href");
 
@@ -29,83 +31,99 @@ async function fetchBlogList(pageNumber) {
 }
 
 /**
- * Fetch and clean full article content
+ * Fetch full article content
  */
-async function fetchArticleContent(articleUrl) {
-  const { data } = await axios.get(articleUrl);
+async function fetchArticleContent(url) {
+  const { data } = await axios.get(url);
   const $ = cheerio.load(data);
 
-  // Adjust selectors if needed after inspection
   const content = [];
 
-  $(".entry-content p, .entry-content h2, .entry-content h3").each((_, el) => {
-    const text = $(el).text().trim();
-    if (text) content.push(text);
-  });
+  // Primary selector
+  $(".entry-content p, .entry-content h2, .entry-content h3").each(
+    (_, el) => {
+      const text = $(el).text().trim();
+      if (text.length > 20) content.push(text);
+    }
+  );
+
+  // Fallback selector (important)
+  if (content.length === 0) {
+    $("article p").each((_, el) => {
+      const text = $(el).text().trim();
+      if (text.length > 20) content.push(text);
+    });
+  }
 
   return content.join("\n\n");
 }
 
+
 /**
- * Main scraper logic
+ * Scrape 5 oldest articles (page 15 + last 4 of page 14)
  */
-export async function scrapeOldestBeyondChatsArticles() {
+async function scrapeOldestArticles() {
   const results = [];
 
-  // 1️⃣ Fetch last page (page 15)
-  let lastPageArticles = [];
-  try {
-    lastPageArticles = await fetchBlogList(15);
-  } catch (err) {
-    console.error("Failed to fetch page 15");
+  const lastPage = await fetchBlogList(15);
+  if (lastPage.length > 0) {
+    results.push(lastPage[0]);
   }
 
-  if (lastPageArticles.length > 0) {
-    results.push(lastPageArticles[0]); // only 1 article exists
-  }
-
-  // 2️⃣ Fetch page 14 and take last 4
   if (results.length < 5) {
-    const page14Articles = await fetchBlogList(14);
+    const page14 = await fetchBlogList(14);
     const remaining = 5 - results.length;
-    const page14Oldest = page14Articles.slice(-remaining).reverse(); // IMPORTANT
-
-    results.push(...page14Oldest);
+    results.push(...page14.slice(-remaining).reverse());
   }
 
-  // 3️⃣ Fetch full content for each article
-  const finalArticles = [];
+  return results;
+}
 
-  for (const article of results) {
-    const content = await fetchArticleContent(article.url);
+/**
+ * Main function: scrape and save to DB
+ */
+async function scrapeAndSave() {
+  await connectDB();
 
-    finalArticles.push({
-      title: article.title,
-      slug: article.url.split("/").filter(Boolean).pop(),
-      content,
-      source: "beyondchats",
-      isUpdatedVersion: false,
-      references: [],
-    });
+  const articles = await scrapeOldestArticles();
+
+  for (const article of articles) {
+    const slug = article.url.split("/").filter(Boolean).pop();
+
+    const exists = await Article.findOne({ slug });
+    if (exists) {
+      console.log(`Skipped (already exists): ${article.title}`);
+      continue;
+    }
+
+const content = await fetchArticleContent(article.url);
+
+if (!content || content.trim().length === 0) {
+  console.warn(`Skipped (empty content): ${article.title}`);
+  continue;
+}
+
+await Article.create({
+  title: article.title,
+  slug,
+  content,
+  source: "beyondchats",
+  isUpdatedVersion: false,
+  references: [],
+});
+
+
+    console.log(`Inserted: ${article.title}`);
   }
 
-  return finalArticles;
+  console.log("Scraping and saving completed");
+  process.exit(0);
 }
 
-// Optional: run directly
-if (process.argv[1].includes("beyondchats.scraper")) {
-  scrapeOldestBeyondChatsArticles().then((data) => {
-    console.log(`Scraped ${data.length} oldest articles`);
-    console.log(data.map((a) => a.title));
-  });
-}
-if (process.argv[1].includes("scraper.js")) {
-  scrapeOldestBeyondChatsArticles()
-    .then((articles) => {
-      console.log("Scraped articles count:", articles.length);
-      articles.forEach((a, i) => {
-        console.log(`${i + 1}. ${a.title}`);
-      });
-    })
-    .catch(console.error);
-}
+/**
+ * Run directly
+ */
+scrapeAndSave().catch((err) => {
+  console.error("Scraper failed:", err);
+  process.exit(1);
+});
