@@ -1,5 +1,7 @@
-const API_BASE_URL = "http://localhost:5000/api/articles";
-
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api/articles";
+  
 export async function fetchArticles() {
   const res = await fetch(API_BASE_URL);
   if (!res.ok) throw new Error("Failed to fetch articles");
